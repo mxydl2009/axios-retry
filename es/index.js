@@ -5,6 +5,11 @@ const namespace = 'axios-retry';
 /**
  * @param  {Error}  error
  * @return {boolean}
+ * 判断网络错误的4个必要条件
+ * 1. error.response不存在或undefined
+ * 2. error.code是truthy值
+ * 3. error.code不是'ECONNABORTED', 'ECONNABORTED'是axios给超时错误和取消请求时添加的code
+ * 4. 由isRetryAllowed()方法定义的一系列允许重新请求的错误
  */
 export function isNetworkError(error) {
   return (
@@ -21,6 +26,7 @@ const IDEMPOTENT_HTTP_METHODS = SAFE_HTTP_METHODS.concat(['put', 'delete']);
 /**
  * @param  {Error}  error
  * @return {boolean}
+ * 在这里，超时错误不是可重复请求的错误
  */
 export function isRetryableError(error) {
   return (
@@ -73,10 +79,13 @@ function noDelay() {
 /**
  * @param  {number} [retryNumber=0]
  * @return {number} - delay in milliseconds
+ * 预定义了指数形式的delay，delay表征重复请求的时间间隔
  */
 export function exponentialDelay(retryNumber = 0) {
+  // delay随着请求次数的增加，呈现指数增长，以100ms作为基准
   const delay = Math.pow(2, retryNumber) * 100;
   const randomSum = delay * 0.2 * Math.random(); // 0-20% of the delay
+  // 相当于最后delay * (1 ~ 1.2)
   return delay + randomSum;
 }
 
@@ -170,13 +179,22 @@ function fixConfig(axios, config) {
  * @param {Function} [defaultOptions.retryDelay=noDelay]
  *        A function to determine the delay between retry requests
  */
+/** 
+ * axiosRetry()函数就是给axios添加了请求拦截器和响应拦截器
+ * 请求拦截器给配置对象注入axios-retry属性，用来配置重复请求
+ * 响应拦截器通过error对象的配置属性，来判断是否需要重复请求，以及重复请求如何操作
+*/
 export default function axiosRetry(axios, defaultOptions) {
+  // 先添加请求拦截器，获取当前配置中关于重复请求的状态，主要是retryCount（已经重复请求的次数）
+  // 拦截器中的config是axios.defaults配置对象
   axios.interceptors.request.use(config => {
     const currentState = getCurrentState(config);
+    // 给配置对象config['axios-retry']添加一个lastRequestTime属性，记录请求发生的时刻
     currentState.lastRequestTime = Date.now();
     return config;
   });
 
+  // 再添加一个响应拦截器，分析错误对象，判断是否需要重新请求
   axios.interceptors.response.use(null, error => {
     const config = error.config;
 
@@ -205,8 +223,12 @@ export default function axiosRetry(axios, defaultOptions) {
       fixConfig(axios, config);
 
       if (!shouldResetTimeout && config.timeout && currentState.lastRequestTime) {
+        // 记录上次请求到响应的时间间隔
         const lastRequestDuration = Date.now() - currentState.lastRequestTime;
         // Minimum 1ms timeout (passing 0 or less to XHR means no timeout)
+
+        // 为什么要重新配置timeout属性？
+        // 重新配置timeout属性，随着delay的增加而逐渐减少
         config.timeout = Math.max(config.timeout - lastRequestDuration - delay, 1);
       }
 
